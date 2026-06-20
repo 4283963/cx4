@@ -20,6 +20,7 @@
     <PortfolioForm
       v-if="!loadingFunds"
       :funds="funds"
+      :scenarios="scenarios"
       :loading="backtestLoading"
       @submit="handleBacktest"
     />
@@ -63,9 +64,10 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import PortfolioForm from './components/PortfolioForm.vue'
 import BacktestResult from './components/BacktestResult.vue'
-import { getFunds, createPortfolio, backtestPortfolio } from './api/index.js'
+import { getFunds, getCrisisScenarios, createPortfolio } from './api/index.js'
 
 const funds = ref([])
+const scenarios = ref([])
 const loadingFunds = ref(true)
 const loadError = ref('')
 const backtestLoading = ref(false)
@@ -76,9 +78,10 @@ async function loadFunds() {
   loadError.value = ''
   try {
     funds.value = await getFunds()
+    scenarios.value = await getCrisisScenarios()
   } catch (error) {
-    console.error('加载基金列表失败:', error)
-    loadError.value = `加载基金列表失败：${error.message}。请确保后端服务已启动并已初始化数据库。`
+    console.error('加载数据失败:', error)
+    loadError.value = `加载数据失败：${error.message}。请确保后端服务已启动并已初始化数据库。`
   } finally {
     loadingFunds.value = false
   }
@@ -89,7 +92,8 @@ async function handleBacktest(formData) {
   try {
     const result = await createPortfolio(formData)
     backtestResult.value = result
-    ElMessage.success('回测完成！')
+    const applied = result.backtest && result.backtest.crisis && result.backtest.crisis.applied
+    ElMessage.success(applied ? '压力回测完成！受灾区间已用亮黄色高亮' : '回测完成！')
   } catch (error) {
     console.error('回测失败:', error)
     ElMessage.error(`回测失败：${error.message}`)

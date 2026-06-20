@@ -10,7 +10,37 @@
           style="max-width: 400px"
         />
       </el-form-item>
+      <el-form-item label="压力情景">
+        <el-select
+          v-model="form.scenario"
+          placeholder="请选择压力回测情景"
+          style="max-width: 400px"
+          @change="onScenarioChange"
+        >
+          <el-option
+            v-for="s in scenarios"
+            :key="s.key"
+            :label="s.label"
+            :value="s.key"
+          >
+            <span style="float: left">{{ s.label }}</span>
+            <span v-if="s.alpha > 1" style="float: right; color: #f56c6c; font-size: 12px">
+              α={{ s.alpha }}
+            </span>
+          </el-option>
+        </el-select>
+      </el-form-item>
     </el-form>
+
+    <el-alert
+      v-if="selectedScenario && selectedScenario.key !== 'none'"
+      :title="`已启用压力情景：${selectedScenario.label}（安全惩罚因子 α=${selectedScenario.alpha}）`"
+      type="warning"
+      :description="selectedScenario.description"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 16px"
+    />
 
     <div style="margin-bottom: 16px">
       <el-button type="primary" @click="addItem" :icon="Plus">
@@ -111,6 +141,10 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  scenarios: {
+    type: Array,
+    default: () => []
+  },
   loading: {
     type: Boolean,
     default: false
@@ -121,11 +155,20 @@ const emit = defineEmits(['submit'])
 
 const form = ref({
   name: '我的投资组合',
+  scenario: 'none',
   items: [
     { fundCode: '', weight: 0.5 },
     { fundCode: '', weight: 0.3 },
     { fundCode: '', weight: 0.2 }
   ]
+})
+
+const selectedScenario = computed(() => {
+  return props.scenarios.find(s => s.key === form.value.scenario) || null
+})
+
+const resolvedMonths = computed(() => {
+  return selectedScenario.value ? selectedScenario.value.requiredMonths : 12
 })
 
 const totalWeight = computed(() => {
@@ -166,6 +209,12 @@ function removeItem(index) {
 
 function onFundChange() {}
 
+function onScenarioChange() {
+  if (form.value.scenario !== 'none') {
+    ElMessage.info(`已切换至压力情景，回测区间自动扩展至 ${resolvedMonths.value} 个月`)
+  }
+}
+
 function handleSubmit() {
   if (!totalWeightValid.value) {
     ElMessage.error(`仓位比例之和必须等于100%，当前为 ${(totalWeight.value * 100).toFixed(2)}%`)
@@ -181,7 +230,9 @@ function handleSubmit() {
 
   emit('submit', {
     name: form.value.name,
-    items: form.value.items
+    items: form.value.items,
+    scenario: form.value.scenario,
+    months: resolvedMonths.value
   })
 }
 

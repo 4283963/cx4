@@ -4,6 +4,16 @@ const MAX_CURVE_POINTS = 300;
 const TRADING_DAYS_PER_YEAR = 252;
 const DEFAULT_RISK_FREE_RATE = 0.02;
 
+function emptyCrisis() {
+  return {
+    applied: false,
+    alpha: 0,
+    scenarioKey: 'none',
+    scenarioLabel: '不复现危机',
+    zones: []
+  };
+}
+
 function emptyResult(message) {
   return {
     cumulativeReturn: 0,
@@ -14,6 +24,7 @@ function emptyResult(message) {
     performanceCurve: [],
     period: { startDate: null, endDate: null, days: 0 },
     rowCount: 0,
+    crisis: emptyCrisis(),
     note: message || ''
   };
 }
@@ -43,14 +54,14 @@ function welfordStats() {
   };
 }
 
+function countInvalid(v) {
+  return Number.isNaN(v) || !Number.isFinite(v);
+}
+
 function calculateSharpeRatio(meanDailyReturn, stdDailyReturn, riskFreeRate) {
   if (stdDailyReturn === 0 || countInvalid(stdDailyReturn)) return 0;
   const dailyRiskFree = (riskFreeRate || DEFAULT_RISK_FREE_RATE) / TRADING_DAYS_PER_YEAR;
   return (meanDailyReturn - dailyRiskFree) / stdDailyReturn * Math.sqrt(TRADING_DAYS_PER_YEAR);
-}
-
-function countInvalid(v) {
-  return Number.isNaN(v) || !Number.isFinite(v);
 }
 
 function calculateAnnualizedReturn(cumulativeReturn, days) {
@@ -79,15 +90,54 @@ function downsampleCurve(curve, maxPoints) {
   return sampled;
 }
 
+function isDateInZones(date, zones) {
+  for (const z of zones) {
+    if (date >= z.startDate && date <= z.endDate) return true;
+  }
+  return false;
+}
+
+function applyCrisisStress(portfolioNav, scenario) {
+  if (!scenario || scenario.key === 'none' || !scenario.zones || scenario.zones.length === 0) {
+    return { stressedNav: portfolioNav, crisisZones: [], applied: false, alpha: 0 };
+  }
+
+  const alpha = scenario.alpha || 1.0;
+  const zones = scenario.zones;
+  const inCrisis = portfolioNav.map(p => isDateInZones(p.date, zones));
+
+  let sum = 0;
+  let count = 0;
+  for (let i = 1; i < portfolioNav.length; i++) {
+    if (inCrisis[i]) {
+      const prev = portfolioNav[i - 1].nav;
+      if (prev > 0) {
+        sum += (portfolioNav[i].nav - prev) / prev;
+        count++;
+      }
+    }
+  }
+  const windowMean = count > 0 ? sum / count : 0;
+
+  const stressedNav = [{ date: portfolioNav[0].date, nav: portfolioNav[0].nav }];
+  for (let i = 1; i < portfolioNav.length; i++) {
+    const prevStressed = stressedNav[i - 1].nav;
+    const prevOrig = portfolioNav[i - 1].nav;
+    const currOrig = portfolioNav[i].nav;
+    let r = prevOrig > 0 ? (currOrig - prevOrig) / prevOrig : 0;
+    if (inCrisis[i]) {
+      r = windowMean + alpha * (r - windowMean);
+    }
+    stressedNav.push({ date: portfolioNav[i].date, nav: prevStressed * (1 + r) });
+  }
+
+  return { stressedNav, crisisZones: zones, applied: true, alpha };
+}
+
 async function buildNavIndex(portfolioItems, fundIds, months) {
   const navIndex = new Map();
   const firstNavByFund = new Map();
   const dateSet = new Set();
-
-  const weightByFundId = new Map();
-  for (const item of portfolioItems) {
-    weightByFundId.set(item.fundId, item.weight);
-  }
 
   let rowCount = 0;
   await streamFundsNavHistory(fundIds, months, (row) => {
@@ -220,7 +270,7 @@ function generatePerformanceCurve(portfolioNav) {
   return downsampleCurve(fullCurve, MAX_CURVE_POINTS);
 }
 
-async function runBacktestStream(portfolioItems, fundIds, months) {
+async function runBacktestStream(portfolioItems, fundIds, months, scenario) {
   const { navIndex, firstNavByFund, sortedDates, rowCount } = await buildNavIndex(
     portfolioItems,
     fundIds,
@@ -237,18 +287,30 @@ async function runBacktestStream(portfolioItems, fundIds, months) {
     return { ...emptyResult('投资组合有效净值点不足，无法进行回测'), rowCount };
   }
 
-  const metrics = computeMetrics(portfolioNav);
-  const performanceCurve = generatePerformanceCurve(portfolioNav);
+  const safeScenario = scenario || { key: 'none', zones: [], label: '不复现危机' };
+  const { stressedNav, crisisZones, applied, alpha } = applyCrisisStress(portfolioNav, safeScenario);
+
+  const metrics = computeMetrics(stressedNav);
+  const performanceCurve = generatePerformanceCurve(stressedNav);
 
   return {
     ...metrics,
     performanceCurve,
-    rowCount
+    rowCount,
+    crisis: {
+      applied,
+      alpha: applied ? alpha : 0,
+      scenarioKey: safeScenario.key,
+      scenarioLabel: safeScenario.label,
+      zones: crisisZones
+    }
   };
 }
 
 module.exports = {
   runBacktestStream,
+  applyCrisisStress,
+  isDateInZones,
   welfordStats,
   calculateAnnualizedReturn,
   calculateSharpeRatio,

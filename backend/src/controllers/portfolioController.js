@@ -1,13 +1,18 @@
 const portfolioRepository = require('../repositories/portfolioRepository');
 const fundRepository = require('../repositories/fundRepository');
 const backtestService = require('../services/backtestService');
+const { getScenario } = require('../config/crisisScenarios');
 
 const MAX_MONTHS = 120;
 const DEFAULT_MONTHS = 12;
 
-function resolveMonths(value) {
-  const months = parseInt(value, 10);
-  if (!months || months <= 0) return DEFAULT_MONTHS;
+function resolveMonths(value, scenario) {
+  const requested = parseInt(value, 10);
+  let months = (!requested || requested <= 0) ? DEFAULT_MONTHS : requested;
+
+  if (scenario && scenario.key !== 'none' && scenario.requiredMonths > months) {
+    months = scenario.requiredMonths;
+  }
   return Math.min(months, MAX_MONTHS);
 }
 
@@ -52,7 +57,7 @@ async function normalizeItems(items) {
 
 async function createPortfolioAndBacktest(ctx) {
   try {
-    const { name, items, months } = ctx.request.body;
+    const { name, items, months, scenario: scenarioKey } = ctx.request.body;
 
     const validation = validatePortfolio(items);
     if (!validation.valid) {
@@ -69,11 +74,15 @@ async function createPortfolioAndBacktest(ctx) {
     }
     const normalizedItems = normalized.items;
 
+    const scenario = getScenario(scenarioKey);
+    const safeMonths = resolveMonths(months, scenario);
+
     const portfolioId = await portfolioRepository.createPortfolio(name, normalizedItems);
 
     const fundIds = normalizedItems.map(item => item.fundId);
-    const safeMonths = resolveMonths(months);
-    const backtestResult = await backtestService.runBacktestStream(normalizedItems, fundIds, safeMonths);
+    const backtestResult = await backtestService.runBacktestStream(
+      normalizedItems, fundIds, safeMonths, scenario
+    );
 
     ctx.body = {
       success: true,
@@ -97,7 +106,8 @@ async function createPortfolioAndBacktest(ctx) {
 async function getPortfolio(ctx) {
   try {
     const { id } = ctx.params;
-    const months = resolveMonths(ctx.query.months);
+    const scenario = getScenario(ctx.query.scenario);
+    const months = resolveMonths(ctx.query.months, scenario);
     const portfolio = await portfolioRepository.getPortfolioById(id);
 
     if (!portfolio) {
@@ -116,7 +126,9 @@ async function getPortfolio(ctx) {
       }));
 
     const fundIds = itemsWithFundId.map(item => item.fundId);
-    const backtestResult = await backtestService.runBacktestStream(itemsWithFundId, fundIds, months);
+    const backtestResult = await backtestService.runBacktestStream(
+      itemsWithFundId, fundIds, months, scenario
+    );
 
     ctx.body = {
       success: true,
@@ -138,7 +150,7 @@ async function getPortfolio(ctx) {
 
 async function backtestPortfolio(ctx) {
   try {
-    const { items, months } = ctx.request.body;
+    const { items, months, scenario: scenarioKey } = ctx.request.body;
 
     const validation = validatePortfolio(items);
     if (!validation.valid) {
@@ -155,9 +167,13 @@ async function backtestPortfolio(ctx) {
     }
     const normalizedItems = normalized.items;
 
+    const scenario = getScenario(scenarioKey);
+    const safeMonths = resolveMonths(months, scenario);
+
     const fundIds = normalizedItems.map(item => item.fundId);
-    const safeMonths = resolveMonths(months);
-    const backtestResult = await backtestService.runBacktestStream(normalizedItems, fundIds, safeMonths);
+    const backtestResult = await backtestService.runBacktestStream(
+      normalizedItems, fundIds, safeMonths, scenario
+    );
 
     ctx.body = {
       success: true,

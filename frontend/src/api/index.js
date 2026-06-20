@@ -35,6 +35,13 @@ export function getFundNav(code, months = 12) {
   })
 }
 
+export function getCrisisScenarios() {
+  return request({
+    url: '/crisis-scenarios',
+    method: 'get'
+  })
+}
+
 export function createPortfolio(data) {
   return request({
     url: '/portfolios',
@@ -43,17 +50,18 @@ export function createPortfolio(data) {
   })
 }
 
-export function getPortfolio(id) {
+export function getPortfolio(id, params = {}) {
   return request({
     url: `/portfolios/${id}`,
-    method: 'get'
+    method: 'get',
+    params
   })
 }
 
-export function backtestPortfolio(items) {
+export function backtestPortfolio(payload) {
   return request({
     url: '/portfolios/backtest',
     method: 'post',
-    data: { items }
+    data: payload
   })
 }

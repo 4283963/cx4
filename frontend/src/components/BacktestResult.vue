@@ -11,6 +11,24 @@
       </span>
     </div>
 
+    <el-alert
+      v-if="data.crisis && data.crisis.applied"
+      :title="`压力回测：${data.crisis.scenarioLabel}（受灾区间波动率已施加安全惩罚因子 α=${data.crisis.alpha}）`"
+      type="error"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 20px"
+    >
+      <template #default>
+        <div style="line-height: 1.8">
+          <span v-for="(z, i) in data.crisis.zones" :key="i" style="margin-right: 16px">
+            <el-tag type="warning" size="small" effect="dark">{{ z.label }}</el-tag>
+            {{ z.startDate }} ~ {{ z.endDate }}
+          </span>
+        </div>
+      </template>
+    </el-alert>
+
     <el-row :gutter="20" style="margin-bottom: 24px">
       <el-col :span="6">
         <div class="metric-card" :class="data.cumulativeReturn >= 0 ? 'positive' : 'negative'">
@@ -87,7 +105,8 @@
 
     <div class="card-section" style="padding: 0; margin-bottom: 0">
       <div class="section-title" style="padding: 20px 24px 0; border: none; margin-bottom: 0">
-        收益曲线（近12个月）
+        收益曲线（{{ data.period.startDate }} ~ {{ data.period.endDate }}
+        <template v-if="data.crisis && data.crisis.applied">· 受灾区间已高亮</template>）
       </div>
       <div class="chart-container">
         <v-chart :option="chartOption" autoresize />
@@ -152,21 +171,106 @@ const chartOption = computed(() => {
   const dates = curve.map(item => item.date)
   const values = curve.map(item => item.value.toFixed(2))
 
+  const crisis = props.data.crisis
+  const hasCrisis = crisis && crisis.applied && crisis.zones && crisis.zones.length > 0
+
+  function isDateInZones(date, zones) {
+    for (const z of zones) {
+      if (date >= z.startDate && date <= z.endDate) return true
+    }
+    return false
+  }
+
+  function clampBoundary(zone, type) {
+    if (type === 'start') {
+      const found = dates.find(d => d >= zone.startDate)
+      return found || zone.startDate
+    }
+    let result = zone.endDate
+    for (const d of dates) {
+      if (d <= zone.endDate) result = d
+    }
+    return result
+  }
+
+  const crisisValues = hasCrisis
+    ? curve.map(item => (isDateInZones(item.date, crisis.zones) ? item.value.toFixed(2) : null))
+    : []
+
+  const markAreaData = hasCrisis
+    ? crisis.zones.map(z => [
+        { xAxis: clampBoundary(z, 'start'), itemStyle: { color: 'rgba(255, 235, 59, 0.28)' } },
+        { xAxis: clampBoundary(z, 'end') }
+      ])
+    : []
+
+  const series = [
+    {
+      name: '累计收益率',
+      type: 'line',
+      smooth: true,
+      symbol: 'none',
+      sampling: 'lttb',
+      itemStyle: { color: '#409eff' },
+      areaStyle: {
+        color: {
+          type: 'linear',
+          x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [
+            { offset: 0, color: 'rgba(64, 158, 255, 0.4)' },
+            { offset: 1, color: 'rgba(64, 158, 255, 0.05)' }
+          ]
+        }
+      },
+      data: values,
+      markLine: {
+        silent: true,
+        data: [
+          { yAxis: 0, lineStyle: { color: '#909399', type: 'dashed' } }
+        ]
+      },
+      markArea: {
+        silent: true,
+        data: markAreaData
+      }
+    }
+  ]
+
+  if (hasCrisis) {
+    series.push({
+      name: '受灾区间',
+      type: 'line',
+      smooth: true,
+      symbol: 'none',
+      connectNulls: false,
+      lineStyle: { color: '#FFD600', width: 3, shadowBlur: 10, shadowColor: 'rgba(255,214,0,0.7)' },
+      itemStyle: { color: '#FFD600' },
+      z: 10,
+      data: crisisValues
+    })
+  }
+
   return {
     tooltip: {
       trigger: 'axis',
       formatter: function (params) {
-        const data = params[0]
-        const value = parseFloat(data.value)
-        const sign = value >= 0 ? '+' : ''
-        return `${data.name}<br/>累计收益率: <strong>${sign}${value.toFixed(2)}%</strong>`
+        const lines = params
+          .filter(p => p.value !== null && p.value !== undefined)
+          .map(p => {
+            const value = parseFloat(p.value)
+            const sign = value >= 0 ? '+' : ''
+            const color = p.seriesName === '受灾区间' ? '#FFD600' : '#409eff'
+            return `<span style="display:inline-block;width:10px;height:10px;background:${color};border-radius:50%;margin-right:6px;"></span>${p.seriesName}: <strong>${sign}${value.toFixed(2)}%</strong>`
+          })
+        return `${params[0].name}<br/>${lines.join('<br/>')}`
       }
     },
+    legend: hasCrisis ? { data: ['累计收益率', '受灾区间'], top: 0 } : { show: false },
     grid: {
       left: '3%',
       right: '4%',
       bottom: '3%',
-      top: '10%',
+      top: hasCrisis ? '12%' : '10%',
       containLabel: true
     },
     xAxis: {
@@ -181,48 +285,9 @@ const chartOption = computed(() => {
     },
     yAxis: {
       type: 'value',
-      axisLabel: {
-        formatter: '{value}%'
-      }
+      axisLabel: { formatter: '{value}%' }
     },
-    series: [
-      {
-        name: '累计收益率',
-        type: 'line',
-        smooth: true,
-        symbol: 'none',
-        sampling: 'lttb',
-        itemStyle: {
-          color: '#409eff'
-        },
-        areaStyle: {
-          color: {
-            type: 'linear',
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: 'rgba(64, 158, 255, 0.4)' },
-              { offset: 1, color: 'rgba(64, 158, 255, 0.05)' }
-            ]
-          }
-        },
-        data: values,
-        markLine: {
-          silent: true,
-          data: [
-            {
-              yAxis: 0,
-              lineStyle: {
-                color: '#909399',
-                type: 'dashed'
-              }
-            }
-          ]
-        }
-      }
-    ]
+    series
   }
 })
 </script>

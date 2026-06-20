@@ -52,7 +52,8 @@ app.listen(PORT, () => {
   console.log(`可用接口:`);
   console.log(`  GET  /api/funds                 - 获取所有基金列表`);
   console.log(`  GET  /api/funds/:code/nav       - 获取指定基金净值历史`);
-  console.log(`  POST /api/portfolios            - 创建投资组合并回测`);
+  console.log(`  GET  /api/crisis-scenarios      - 获取危机压力回测情景列表`);
+  console.log(`  POST /api/portfolios            - 创建投资组合并回测(支持 scenario 压力情景)`);
   console.log(`  GET  /api/portfolios/:id        - 获取投资组合详情及回测`);
-  console.log(`  POST /api/portfolios/backtest   - 对投资组合进行回测`);
+  console.log(`  POST /api/portfolios/backtest   - 对投资组合进行回测(支持 scenario 压力情景)`);
 });
