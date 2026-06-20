@@ -1,4 +1,5 @@
-const { query } = require('../db/pool');
+const { query, pool } = require('../db/pool');
+const QueryStream = require('pg-query-stream');
 
 async function getAllFunds() {
   const result = await query(
@@ -59,9 +60,48 @@ async function getFundsNavHistory(fundIds, months = 12) {
   return navMap;
 }
 
+function toDateString(value) {
+  if (value instanceof Date) {
+    return value.toISOString().split('T')[0];
+  }
+  return String(value);
+}
+
+async function streamFundsNavHistory(fundIds, months, onRow) {
+  if (fundIds.length === 0) return 0;
+
+  const safeMonths = Math.max(1, Math.min(parseInt(months, 10) || 12, 120));
+  const placeholders = fundIds.map((_, i) => `$${i + 1}`).join(',');
+  const sql = `SELECT fund_id, nav_date, nav_value
+     FROM fund_nav 
+     WHERE fund_id IN (${placeholders})
+     AND nav_date >= CURRENT_DATE - INTERVAL '${safeMonths} months'
+     ORDER BY fund_id, nav_date ASC`;
+
+  const client = await pool.connect();
+  let rowCount = 0;
+  try {
+    const queryStream = new QueryStream(sql, fundIds, { batchSize: 1000 });
+    const stream = client.query(queryStream);
+
+    for await (const row of stream) {
+      onRow({
+        fundId: row.fund_id,
+        date: toDateString(row.nav_date),
+        nav: parseFloat(row.nav_value)
+      });
+      rowCount++;
+    }
+  } finally {
+    client.release();
+  }
+  return rowCount;
+}
+
 module.exports = {
   getAllFunds,
   getFundByCode,
   getFundNavHistory,
   getFundsNavHistory,
+  streamFundsNavHistory,
 };

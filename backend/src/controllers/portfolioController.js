@@ -2,6 +2,15 @@ const portfolioRepository = require('../repositories/portfolioRepository');
 const fundRepository = require('../repositories/fundRepository');
 const backtestService = require('../services/backtestService');
 
+const MAX_MONTHS = 120;
+const DEFAULT_MONTHS = 12;
+
+function resolveMonths(value) {
+  const months = parseInt(value, 10);
+  if (!months || months <= 0) return DEFAULT_MONTHS;
+  return Math.min(months, MAX_MONTHS);
+}
+
 function validatePortfolio(items) {
   if (!items || items.length === 0) {
     return { valid: false, message: '投资组合不能为空' };
@@ -24,54 +33,53 @@ function validatePortfolio(items) {
   return { valid: true };
 }
 
+async function normalizeItems(items) {
+  const normalizedItems = [];
+  for (const item of items) {
+    const fund = await fundRepository.getFundByCode(item.fundCode);
+    if (!fund) {
+      return { ok: false, message: `基金代码 ${item.fundCode} 不存在` };
+    }
+    normalizedItems.push({
+      fundId: fund.id,
+      fundCode: item.fundCode,
+      fundName: fund.name,
+      weight: parseFloat(item.weight)
+    });
+  }
+  return { ok: true, items: normalizedItems };
+}
+
 async function createPortfolioAndBacktest(ctx) {
   try {
-    const { name, items } = ctx.request.body;
+    const { name, items, months } = ctx.request.body;
 
     const validation = validatePortfolio(items);
     if (!validation.valid) {
       ctx.status = 400;
-      ctx.body = {
-        success: false,
-        message: validation.message
-      };
+      ctx.body = { success: false, message: validation.message };
       return;
     }
 
-    const normalizedItems = [];
-    for (const item of items) {
-      const fund = await fundRepository.getFundByCode(item.fundCode);
-      if (!fund) {
-        ctx.status = 400;
-        ctx.body = {
-          success: false,
-          message: `基金代码 ${item.fundCode} 不存在`
-        };
-        return;
-      }
-      normalizedItems.push({
-        fundId: fund.id,
-        fundCode: item.fundCode,
-        fundName: fund.name,
-        weight: parseFloat(item.weight)
-      });
+    const normalized = await normalizeItems(items);
+    if (!normalized.ok) {
+      ctx.status = 400;
+      ctx.body = { success: false, message: normalized.message };
+      return;
     }
+    const normalizedItems = normalized.items;
 
     const portfolioId = await portfolioRepository.createPortfolio(name, normalizedItems);
 
     const fundIds = normalizedItems.map(item => item.fundId);
-    const navDataMap = await fundRepository.getFundsNavHistory(fundIds, 12);
-
-    const backtestResult = await backtestService.runBacktest(normalizedItems, navDataMap);
+    const safeMonths = resolveMonths(months);
+    const backtestResult = await backtestService.runBacktestStream(normalizedItems, fundIds, safeMonths);
 
     ctx.body = {
       success: true,
       data: {
         portfolioId,
-        portfolio: {
-          name,
-          items: normalizedItems
-        },
+        portfolio: { name, items: normalizedItems },
         backtest: backtestResult
       }
     };
@@ -89,14 +97,12 @@ async function createPortfolioAndBacktest(ctx) {
 async function getPortfolio(ctx) {
   try {
     const { id } = ctx.params;
+    const months = resolveMonths(ctx.query.months);
     const portfolio = await portfolioRepository.getPortfolioById(id);
 
     if (!portfolio) {
       ctx.status = 404;
-      ctx.body = {
-        success: false,
-        message: '投资组合不存在'
-      };
+      ctx.body = { success: false, message: '投资组合不存在' };
       return;
     }
 
@@ -110,9 +116,7 @@ async function getPortfolio(ctx) {
       }));
 
     const fundIds = itemsWithFundId.map(item => item.fundId);
-    const navDataMap = await fundRepository.getFundsNavHistory(fundIds, 12);
-
-    const backtestResult = await backtestService.runBacktest(itemsWithFundId, navDataMap);
+    const backtestResult = await backtestService.runBacktestStream(itemsWithFundId, fundIds, months);
 
     ctx.body = {
       success: true,
@@ -134,48 +138,31 @@ async function getPortfolio(ctx) {
 
 async function backtestPortfolio(ctx) {
   try {
-    const { items } = ctx.request.body;
+    const { items, months } = ctx.request.body;
 
     const validation = validatePortfolio(items);
     if (!validation.valid) {
       ctx.status = 400;
-      ctx.body = {
-        success: false,
-        message: validation.message
-      };
+      ctx.body = { success: false, message: validation.message };
       return;
     }
 
-    const normalizedItems = [];
-    for (const item of items) {
-      const fund = await fundRepository.getFundByCode(item.fundCode);
-      if (!fund) {
-        ctx.status = 400;
-        ctx.body = {
-          success: false,
-          message: `基金代码 ${item.fundCode} 不存在`
-        };
-        return;
-      }
-      normalizedItems.push({
-        fundId: fund.id,
-        fundCode: item.fundCode,
-        fundName: fund.name,
-        weight: parseFloat(item.weight)
-      });
+    const normalized = await normalizeItems(items);
+    if (!normalized.ok) {
+      ctx.status = 400;
+      ctx.body = { success: false, message: normalized.message };
+      return;
     }
+    const normalizedItems = normalized.items;
 
     const fundIds = normalizedItems.map(item => item.fundId);
-    const navDataMap = await fundRepository.getFundsNavHistory(fundIds, 12);
-
-    const backtestResult = await backtestService.runBacktest(normalizedItems, navDataMap);
+    const safeMonths = resolveMonths(months);
+    const backtestResult = await backtestService.runBacktestStream(normalizedItems, fundIds, safeMonths);
 
     ctx.body = {
       success: true,
       data: {
-        portfolio: {
-          items: normalizedItems
-        },
+        portfolio: { items: normalizedItems },
         backtest: backtestResult
       }
     };

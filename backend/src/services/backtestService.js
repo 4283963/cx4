@@ -1,25 +1,56 @@
-const { mean, std } = require('mathjs');
+const { streamFundsNavHistory } = require('../repositories/fundRepository');
 
-function calculateDailyReturns(navSeries) {
-  const returns = [];
-  for (let i = 1; i < navSeries.length; i++) {
-    const prevNav = navSeries[i - 1].nav;
-    const currNav = navSeries[i].nav;
-    if (prevNav > 0) {
-      returns.push({
-        date: navSeries[i].date,
-        dailyReturn: (currNav - prevNav) / prevNav
-      });
-    }
-  }
-  return returns;
+const MAX_CURVE_POINTS = 300;
+const TRADING_DAYS_PER_YEAR = 252;
+const DEFAULT_RISK_FREE_RATE = 0.02;
+
+function emptyResult(message) {
+  return {
+    cumulativeReturn: 0,
+    annualizedReturn: 0,
+    sharpeRatio: 0,
+    maxDrawdown: 0,
+    maxDrawdownInfo: { peakDate: null, troughDate: null },
+    performanceCurve: [],
+    period: { startDate: null, endDate: null, days: 0 },
+    rowCount: 0,
+    note: message || ''
+  };
 }
 
-function calculateCumulativeReturn(navSeries) {
-  if (navSeries.length < 2) return 0;
-  const startNav = navSeries[0].nav;
-  const endNav = navSeries[navSeries.length - 1].nav;
-  return (endNav - startNav) / startNav;
+function welfordStats() {
+  let count = 0;
+  let mean = 0;
+  let m2 = 0;
+
+  function push(value) {
+    count++;
+    const delta = value - mean;
+    mean += delta / count;
+    m2 += delta * (value - mean);
+  }
+
+  function variance() {
+    if (count < 2) return 0;
+    return m2 / (count - 1);
+  }
+
+  return {
+    push,
+    get mean() { return mean; },
+    get count() { return count; },
+    std() { return Math.sqrt(variance()); }
+  };
+}
+
+function calculateSharpeRatio(meanDailyReturn, stdDailyReturn, riskFreeRate) {
+  if (stdDailyReturn === 0 || countInvalid(stdDailyReturn)) return 0;
+  const dailyRiskFree = (riskFreeRate || DEFAULT_RISK_FREE_RATE) / TRADING_DAYS_PER_YEAR;
+  return (meanDailyReturn - dailyRiskFree) / stdDailyReturn * Math.sqrt(TRADING_DAYS_PER_YEAR);
+}
+
+function countInvalid(v) {
+  return Number.isNaN(v) || !Number.isFinite(v);
 }
 
 function calculateAnnualizedReturn(cumulativeReturn, days) {
@@ -27,65 +58,61 @@ function calculateAnnualizedReturn(cumulativeReturn, days) {
   return Math.pow(1 + cumulativeReturn, 365 / days) - 1;
 }
 
-function calculateSharpeRatio(dailyReturns, riskFreeRate = 0.02) {
-  if (dailyReturns.length < 2) return 0;
+function downsampleCurve(curve, maxPoints) {
+  if (curve.length <= maxPoints) return curve;
 
-  const returnsArray = dailyReturns.map(r => r.dailyReturn);
-  const meanDailyReturn = mean(returnsArray);
-  const stdDailyReturn = std(returnsArray);
-
-  if (stdDailyReturn === 0) return 0;
-
-  const dailyRiskFree = riskFreeRate / 252;
-  const sharpe = (meanDailyReturn - dailyRiskFree) / stdDailyReturn * Math.sqrt(252);
-
-  return sharpe;
-}
-
-function calculateMaxDrawdown(navSeries) {
-  if (navSeries.length < 2) return { maxDrawdown: 0, peakDate: null, troughDate: null };
-
-  let maxDrawdown = 0;
-  let peak = navSeries[0].nav;
-  let peakDate = navSeries[0].date;
-  let currentPeakDate = navSeries[0].date;
-  let troughDate = navSeries[0].date;
-
-  for (let i = 1; i < navSeries.length; i++) {
-    const nav = navSeries[i].nav;
-    const date = navSeries[i].date;
-
-    if (nav > peak) {
-      peak = nav;
-      currentPeakDate = date;
-    }
-
-    const drawdown = (peak - nav) / peak;
-    if (drawdown > maxDrawdown) {
-      maxDrawdown = drawdown;
-      peakDate = currentPeakDate;
-      troughDate = date;
-    }
+  const step = Math.ceil(curve.length / maxPoints);
+  const sampled = [];
+  for (let i = 0; i < curve.length; i += step) {
+    sampled.push(curve[i]);
   }
 
-  return {
-    maxDrawdown,
-    peakDate,
-    troughDate
-  };
+  const last = curve[curve.length - 1];
+  const tail = sampled[sampled.length - 1];
+  if (tail !== last) {
+    if (sampled.length >= maxPoints) {
+      sampled[sampled.length - 1] = last;
+    } else {
+      sampled.push(last);
+    }
+  }
+  return sampled;
 }
 
-function alignDates(navDataMap) {
-  const allDates = new Set();
-  for (const fundId in navDataMap) {
-    navDataMap[fundId].forEach(item => allDates.add(item.date));
+async function buildNavIndex(portfolioItems, fundIds, months) {
+  const navIndex = new Map();
+  const firstNavByFund = new Map();
+  const dateSet = new Set();
+
+  const weightByFundId = new Map();
+  for (const item of portfolioItems) {
+    weightByFundId.set(item.fundId, item.weight);
   }
 
-  const sortedDates = Array.from(allDates).sort();
-  return sortedDates;
+  let rowCount = 0;
+  await streamFundsNavHistory(fundIds, months, (row) => {
+    const { fundId, date, nav } = row;
+
+    let fundMap = navIndex.get(fundId);
+    if (!fundMap) {
+      fundMap = new Map();
+      navIndex.set(fundId, fundMap);
+    }
+    fundMap.set(date, nav);
+
+    if (!firstNavByFund.has(fundId)) {
+      firstNavByFund.set(fundId, nav);
+    }
+
+    dateSet.add(date);
+    rowCount++;
+  });
+
+  const sortedDates = Array.from(dateSet).sort();
+  return { navIndex, firstNavByFund, sortedDates, rowCount };
 }
 
-function calculatePortfolioNav(portfolioItems, navDataMap, sortedDates) {
+function calculatePortfolioNav(portfolioItems, navIndex, firstNavByFund, sortedDates) {
   const portfolioNav = [];
 
   for (const date of sortedDates) {
@@ -93,59 +120,28 @@ function calculatePortfolioNav(portfolioItems, navDataMap, sortedDates) {
     let hasValidData = false;
 
     for (const item of portfolioItems) {
-      const fundId = item.fundId;
-      const weight = item.weight;
+      const fundMap = navIndex.get(item.fundId);
+      if (!fundMap) continue;
 
-      if (!navDataMap[fundId]) continue;
-
-      const navItem = navDataMap[fundId].find(n => n.date === date);
-      if (navItem) {
-        const firstNav = navDataMap[fundId][0].nav;
+      const nav = fundMap.get(date);
+      if (nav !== undefined) {
+        const firstNav = firstNavByFund.get(item.fundId);
         if (firstNav > 0) {
-          portfolioValue += weight * (navItem.nav / firstNav);
+          portfolioValue += item.weight * (nav / firstNav);
           hasValidData = true;
         }
       }
     }
 
     if (hasValidData) {
-      portfolioNav.push({
-        date,
-        nav: portfolioValue
-      });
+      portfolioNav.push({ date, nav: portfolioValue });
     }
   }
 
   return portfolioNav;
 }
 
-function generatePerformanceCurve(portfolioNav) {
-  if (portfolioNav.length === 0) return [];
-
-  const baseValue = portfolioNav[0].nav;
-  return portfolioNav.map(item => ({
-    date: item.date,
-    value: baseValue > 0 ? ((item.nav - baseValue) / baseValue * 100) : 0
-  }));
-}
-
-async function runBacktest(portfolioItems, navDataMap) {
-  const sortedDates = alignDates(navDataMap);
-
-  if (sortedDates.length < 2) {
-    return {
-      cumulativeReturn: 0,
-      annualizedReturn: 0,
-      sharpeRatio: 0,
-      maxDrawdown: 0,
-      maxDrawdownInfo: { peakDate: null, troughDate: null },
-      performanceCurve: [],
-      period: { startDate: null, endDate: null, days: 0 }
-    };
-  }
-
-  const portfolioNav = calculatePortfolioNav(portfolioItems, navDataMap, sortedDates);
-
+function computeMetrics(portfolioNav) {
   if (portfolioNav.length < 2) {
     return {
       cumulativeReturn: 0,
@@ -153,49 +149,112 @@ async function runBacktest(portfolioItems, navDataMap) {
       sharpeRatio: 0,
       maxDrawdown: 0,
       maxDrawdownInfo: { peakDate: null, troughDate: null },
-      performanceCurve: [],
       period: { startDate: null, endDate: null, days: 0 }
     };
   }
 
-  const dailyReturns = calculateDailyReturns(portfolioNav);
-  const cumulativeReturn = calculateCumulativeReturn(portfolioNav);
+  const stats = welfordStats();
+  let peak = portfolioNav[0].nav;
+  let currentPeakDate = portfolioNav[0].date;
+  let maxDrawdown = 0;
+  let peakDate = portfolioNav[0].date;
+  let troughDate = portfolioNav[0].date;
+  let prevNav = null;
+
+  for (let i = 0; i < portfolioNav.length; i++) {
+    const point = portfolioNav[i];
+
+    if (prevNav !== null && prevNav > 0) {
+      const dailyReturn = (point.nav - prevNav) / prevNav;
+      stats.push(dailyReturn);
+    }
+
+    if (point.nav > peak) {
+      peak = point.nav;
+      currentPeakDate = point.date;
+    }
+
+    const drawdown = peak > 0 ? (peak - point.nav) / peak : 0;
+    if (drawdown > maxDrawdown) {
+      maxDrawdown = drawdown;
+      peakDate = currentPeakDate;
+      troughDate = point.date;
+    }
+
+    prevNav = point.nav;
+  }
+
+  const startNav = portfolioNav[0].nav;
+  const endNav = portfolioNav[portfolioNav.length - 1].nav;
+  const cumulativeReturn = startNav > 0 ? (endNav - startNav) / startNav : 0;
 
   const startDate = portfolioNav[0].date;
   const endDate = portfolioNav[portfolioNav.length - 1].date;
   const days = Math.floor((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24));
 
   const annualizedReturn = calculateAnnualizedReturn(cumulativeReturn, days);
-  const sharpeRatio = calculateSharpeRatio(dailyReturns);
-  const drawdownInfo = calculateMaxDrawdown(portfolioNav);
-  const performanceCurve = generatePerformanceCurve(portfolioNav);
+  const sharpeRatio = calculateSharpeRatio(stats.mean, stats.std(), DEFAULT_RISK_FREE_RATE);
 
   return {
     cumulativeReturn,
     annualizedReturn,
     sharpeRatio,
-    maxDrawdown: drawdownInfo.maxDrawdown,
-    maxDrawdownInfo: {
-      peakDate: drawdownInfo.peakDate,
-      troughDate: drawdownInfo.troughDate
-    },
+    maxDrawdown,
+    maxDrawdownInfo: { peakDate, troughDate },
+    period: { startDate, endDate, days }
+  };
+}
+
+function generatePerformanceCurve(portfolioNav) {
+  if (portfolioNav.length === 0) return [];
+
+  const baseValue = portfolioNav[0].nav;
+  const fullCurve = [];
+  for (const point of portfolioNav) {
+    fullCurve.push({
+      date: point.date,
+      value: baseValue > 0 ? ((point.nav - baseValue) / baseValue * 100) : 0
+    });
+  }
+
+  return downsampleCurve(fullCurve, MAX_CURVE_POINTS);
+}
+
+async function runBacktestStream(portfolioItems, fundIds, months) {
+  const { navIndex, firstNavByFund, sortedDates, rowCount } = await buildNavIndex(
+    portfolioItems,
+    fundIds,
+    months
+  );
+
+  if (sortedDates.length < 2) {
+    return { ...emptyResult('历史净值数据不足，无法进行回测'), rowCount };
+  }
+
+  const portfolioNav = calculatePortfolioNav(portfolioItems, navIndex, firstNavByFund, sortedDates);
+
+  if (portfolioNav.length < 2) {
+    return { ...emptyResult('投资组合有效净值点不足，无法进行回测'), rowCount };
+  }
+
+  const metrics = computeMetrics(portfolioNav);
+  const performanceCurve = generatePerformanceCurve(portfolioNav);
+
+  return {
+    ...metrics,
     performanceCurve,
-    period: {
-      startDate,
-      endDate,
-      days
-    }
+    rowCount
   };
 }
 
 module.exports = {
-  calculateDailyReturns,
-  calculateCumulativeReturn,
+  runBacktestStream,
+  welfordStats,
   calculateAnnualizedReturn,
   calculateSharpeRatio,
-  calculateMaxDrawdown,
-  runBacktest,
+  downsampleCurve,
+  buildNavIndex,
   calculatePortfolioNav,
-  alignDates,
+  computeMetrics,
   generatePerformanceCurve
 };
